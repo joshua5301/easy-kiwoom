@@ -3,10 +3,13 @@ name = "easykiwoom"
 version = "0.1.0"
 description = ""
 authors = ["Park Junha <junha5301@gmail.com>"]
+license = "GPL-3.0"
 readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.10"
+mplfinance = "^0.12.10b0"
+freezegun = "^1.5.1"
 
 
 [build-system]

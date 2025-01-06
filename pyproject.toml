@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "easykiwoom"
-version = "0.1.0"
-description = ""
+version = "0.1.1"
+description = "쉽고 간편한 키움증권 API"
 authors = ["Park Junha <junha5301@gmail.com>"]
 license = "GPL-3.0"
 readme = "README.md"

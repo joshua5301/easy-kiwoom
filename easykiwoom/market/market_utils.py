@@ -3,6 +3,7 @@ import time
 import datetime
 import threading
 from typing import Callable
+from functools import wraps
 
 cur_key_num = 0
 def get_unique_request_name() -> str:
@@ -36,6 +37,7 @@ def trace(func: Callable) -> Callable:
     Callable
         시작과 끝을 logging하는 함수를 반환합니다.
     """
+    @wraps(func)
     def wrapper(*args, **kwargs):
         logging.debug(f'{threading.current_thread().name} at {datetime.datetime.now()}:')
         logging.debug(f'    {func.__name__} starts with args - {args}, kwargs - {kwargs}')
@@ -62,7 +64,7 @@ def request_api_method(func: Callable) -> Callable:
     Callable
         최근에 호출한 조회 API 횟수에 따라 잠깐 기다리는 closure를 반환합니다.
     """
-
+    @wraps(func)
     def wrapper(*args, **kwargs):
         # 만약 1초 내로 요청이 3번 이상 왔다면 1초 기다립니다.
         global _request_api_num_per_second, _request_api_lock
@@ -94,7 +96,7 @@ def order_api_method(func: Callable) -> Callable:
     Callable
         최근에 호출한 주문 API 횟수에 따라 잠깐 기다리는 closure를 반환합니다.
     """
-    
+    @wraps(func)
     def wrapper(*args, **kwargs):
         # 만약 1초 내로 주문 요청이 3번 이상 왔다면 1초 기다립니다.
         global _order_api_num_per_second, _order_api_lock

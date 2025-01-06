@@ -1,11 +1,14 @@
 import copy
 import logging
 import os
+import sys
 import queue
 import json
 import subprocess
 import socket
 import threading
+import psutil
+import signal
 from collections import defaultdict
 from .market_utils import *
 
@@ -78,7 +81,10 @@ class Market():
         이 과정을 계속해서 반복합니다.
         """
         while True:
-            responses = self._receive_from_proxy()
+            try:
+                responses = self._receive_from_proxy()
+            except ConnectionError:
+                break
             for response in responses:
                 type, key, value = response['type'], response['key'], response['value']
                 if type == 'balance_change':
@@ -133,17 +139,41 @@ class Market():
         return tr_results
 
     @trace
-    def initialize(self) -> None:
+    def initialize(self, logging_level: str = 'ERROR') -> None:
         """
         키움증권 프록시와 연결하고 주식시장을 초기화합니다.
         (로그인 -> 계좌번호 로드 -> 초기 잔고 로드)
         
         다른 메서드를 사용하기 전에 오직 한번만 호출되어야 합니다.
+
+        Parameters
+        ----------
+        logging_level : str, optional
+            로깅 레벨을 설정합니다.
+            'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL' 중 하나를 선택할 수 있습니다.
+            
+            프로그램이 잘 동작하는지 확인하고 싶을 때는 'INFO'를 사용하고,
+            일반적인 사용시에는 'ERROR'를 사용하는 것을 추천합니다.
         """
-        exe_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'start_kiwoom_proxy.exe')
-        subprocess.Popen(exe_path, shell=True)
-        time.sleep(1)
-        self._socket.connect(('127.0.0.1', 53939))
+        exe_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'kiwoom_proxy.exe')
+        self.proxy = subprocess.Popen(
+            [exe_path, logging_level],
+            stdin=None,
+            stdout=sys.stdout,
+            stderr=sys.stderr
+        )
+        while True:
+            try:
+                self._socket.connect(('127.0.0.1', 53939))
+                break
+            except ConnectionRefusedError:
+                time.sleep(1)
+
+        def signal_handler(sig, frame):
+            self.terminate()
+            raise KeyboardInterrupt
+        signal.signal(signal.SIGINT, signal_handler)
+
         self._receiver_thread.start()
         self._resetter_thread.start()
 
@@ -162,6 +192,16 @@ class Market():
         for tr_result in tr_results:
             balance = balance | tr_result
         self._balance = balance
+
+    @trace
+    def terminate(self) -> None:
+        """
+        키움증권 프록시를 종료합니다.
+        """
+        self._socket.close()
+        parent = psutil.Process(self.proxy.pid)
+        for child in parent.children(recursive=True):
+            child.terminate()
 
     @request_api_method
     @trace
@@ -351,7 +391,7 @@ class Market():
                 '주문수량': int,
                 '체결가': int,
                 '체결량': int,
-                '미체결량': int,
+                '미체결수량': int,
                 '주문번호': str,
             }
         """
@@ -360,7 +400,7 @@ class Market():
                 self._result_buffer['order_result'][order_number] = queue.Queue(maxsize=1)
         while True:
             order_result = self._result_buffer['order_result'][order_number].get()
-            if order_result['미체결량'] == 0:
+            if order_result['미체결수량'] == 0:
                 break
         return order_result
     
@@ -409,15 +449,23 @@ class Market():
         return tr_results[0]
     
     @trace
-    def get_price_info(self, stock_code: str) -> dict:
+    def get_price_info(self, stock_code: str, wait_time: int = 3) -> dict:
         """
         주어진 주식 코드에 대한 실시간 가격 정보를 가져옵니다.
-        주식시장이 과열되면 일정시간동안 거래가 중지되어 정보가 들어오지 않을 수 있습니다.
+        register_price_info가 한번 선행되어야 합니다.
+
+        거래가 드물거나 중지되면 정보가 들어오지 않을 수 있습니다.
+        이 경우 일정 시간 기다린 뒤에 직접적인 정보 요청을 시도합니다.
+        다만 그럴 경우 API 조회 요청 횟수에 포함됩니다.
 
         Parameters
         ----------
         stock_code : str
             실시간 정보를 가져올 주식 코드입니다.
+
+        wait_time : int, optional
+            직접적인 정보 요청을 시도하기 전 대기할 시간입니다.
+            Default로 3초입니다.
 
         Returns
         -------
@@ -430,23 +478,40 @@ class Market():
                 '저가': int,
             }
         """
-        try:
-            cur_price_info = self._price_info[stock_code]
-        except KeyError:
+        cur_price_info = None
+        while True:
+            try:
+                cur_price_info = self._price_info[stock_code]
+                break
+            except KeyError:
+                if wait_time <= 0:
+                    break
+                time.sleep(1)
+                wait_time -= 1
+
+        if cur_price_info is None:
             self._price_info[stock_code] = self._get_price_info(stock_code)
             cur_price_info = self._price_info[stock_code]
         return cur_price_info
     
     @trace
-    def get_ask_bid_info(self, stock_code: str) -> dict:
+    def get_ask_bid_info(self, stock_code: str, wait_time: int = 3) -> dict:
         """
         주어진 주식 코드에 대한 실시간 호가 정보를 가져옵니다.
-        주식시장이 과열되면 일정시간동안 거래가 중지되어 정보가 갱신되지 않을 수 있습니다.
+        register_ask_bid_info가 한번 선행되어야 합니다.
+
+        거래가 드물거나 중지되면 정보가 들어오지 않을 수 있습니다.
+        이 경우 일정 시간 기다린 뒤에 직접적인 정보 요청을 시도합니다.
+        다만 그럴 경우 API 조회 요청 횟수에 포함됩니다.
 
         Parameters
         ----------
         stock_code : str
             실시간 정보를 가져올 주식 코드입니다.
+        
+        wait_time : int, optional
+            직접적인 정보 요청을 시도하기 전 대기할 시간입니다.
+            Default로 3초입니다.
 
         Returns
         -------
@@ -460,9 +525,18 @@ class Market():
             매수호가정보는 (가격, 수량)의 호가정보가 리스트에 1번부터 10번까지 순서대로 들어있습니다.
             매도호가정보도 마찬가지입니다.
         """
-        try:
-            cur_ask_bid_info = self._ask_bid_info[stock_code]
-        except KeyError:
+        cur_ask_bid_info = None
+        while True:
+            try:
+                cur_ask_bid_info = self._ask_bid_info[stock_code]
+                break
+            except KeyError:
+                if wait_time <= 0:
+                    break
+                time.sleep(1)
+                wait_time -= 1
+
+        if cur_ask_bid_info is None:
             self._ask_bid_info[stock_code] = self._get_ask_bid_info(stock_code)
             cur_ask_bid_info = self._ask_bid_info[stock_code]
         return cur_ask_bid_info

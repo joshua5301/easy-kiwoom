@@ -10,6 +10,7 @@ readme = "README.md"
 python = "^3.10"
 mplfinance = "^0.12.10b0"
 freezegun = "^1.5.1"
+psutil = "^6.1.1"
 
 
 [build-system]
